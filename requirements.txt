@@ -1,0 +1,15 @@
+streamlit
+PyPDF2
+pdfplumber
+sentence-transformers
+faiss-cpu
+chromadb
+langchain-chroma
+langchain
+langchain-community
+langchain-huggingface
+pymupdf
+requests
+pandas
+openpyxl
+protobuf<5
