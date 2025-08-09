@@ -20,7 +20,7 @@ import os
 import re
 import hashlib
 import tempfile
-from typing import Any, List
+from typing import Any, List, Tuple, Optional
 
 import streamlit as st
 import pandas as pd
@@ -100,6 +100,30 @@ def process_pdf(file_bytes: bytes) -> List[Document]:
             pages = []
         docs = pages
 
+    # Optional OCR fallback if very little text was extracted
+    try:
+        total_len = sum(len(d.page_content or "") for d in docs)
+        if total_len < 50:
+            try:
+                from pdf2image import convert_from_path  # type: ignore
+                import pytesseract  # type: ignore
+                images = convert_from_path(tmp_path)
+                ocr_pages: List[Document] = []
+                for i, img in enumerate(images, start=1):
+                    try:
+                        txt = pytesseract.image_to_string(img) or ""
+                        txt = clean_text(txt)
+                        if txt:
+                            ocr_pages.append(Document(page_content=txt, metadata={"page": i}))
+                    except Exception:
+                        continue
+                if ocr_pages:
+                    docs = ocr_pages
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     try:
         os.unlink(tmp_path)
     except Exception:
@@ -123,12 +147,77 @@ def get_embeddings() -> HuggingFaceEmbeddings:
 
 
 def get_or_build_vectorstore(chunks: List[Document], file_id: str) -> Chroma:
+    """Create a persistent Chroma vectorstore with fallbacks for newer tenant/database APIs.
+
+    If persistent creation fails (e.g., tenant not found), falls back to in-memory so the app keeps working.
+    """
     base_dir = os.path.join(".rag_index", file_id)
     os.makedirs(base_dir, exist_ok=True)
     embeddings = get_embeddings()
+
+    # Try creating an explicit PersistentClient to avoid tenant issues (chroma >=0.5)
+    client = None
+    try:
+        import chromadb  # type: ignore
+        try:
+            from chromadb.config import Settings  # type: ignore
+            settings = None
+            try:
+                settings = Settings(anonymized_telemetry=False, allow_reset=True, persist_directory=base_dir)
+            except Exception:
+                settings = None
+            try:
+                if settings is not None:
+                    client = chromadb.PersistentClient(settings=settings)
+                else:
+                    # Fallback signature (older versions may accept path)
+                    client = chromadb.PersistentClient(path=base_dir)
+            except Exception:
+                try:
+                    client = chromadb.PersistentClient(path=base_dir)
+                except Exception:
+                    client = None
+            # Best-effort: ensure default tenant/database exist (APIs present in newer versions)
+            if client is not None:
+                try:
+                    if hasattr(client, "get_tenant") and hasattr(client, "create_tenant"):
+                        try:
+                            client.get_tenant("default_tenant")
+                        except Exception:
+                            client.create_tenant("default_tenant")
+                    if hasattr(client, "get_database") and hasattr(client, "create_database"):
+                        try:
+                            client.get_database("default_database")
+                        except Exception:
+                            client.create_database("default_database")
+                except Exception:
+                    pass
+        except Exception:
+            client = None
+    except Exception:
+        client = None
+
+    # Try vectorstore with explicit client
+    if client is not None:
+        try:
+            vs = Chroma(client=client, collection_name=f"rag_{file_id}", embedding_function=embeddings)
+            try:
+                count = 0
+                try:
+                    count = vs._collection.count()  # type: ignore[attr-defined]
+                except Exception:
+                    count = 0
+                if count == 0:
+                    vs.add_documents(chunks)
+            except Exception:
+                pass
+            return vs
+        except Exception:
+            pass
+
+    # Fallback to legacy persistent path
     try:
         vs = Chroma(persist_directory=base_dir, embedding_function=embeddings)
-        # Populate if empty
         try:
             count = 0
             try:
@@ -141,8 +230,8 @@ def get_or_build_vectorstore(chunks: List[Document], file_id: str) -> Chroma:
             pass
         return vs
     except Exception:
-        vs = Chroma.from_documents(chunks, embeddings, persist_directory=base_dir)
-        return vs
+        # Final fallback: in-memory (non-persistent)
+        return Chroma.from_documents(chunks, embeddings)
 
 
 def search_documents(vectorstore: Chroma, query: str, k: int = 6, method: str = "auto", fetch_k: int | None = None) -> List[Document]:
@@ -163,6 +252,7 @@ def smart_search(
     fetch_k: int | None = None,
     chunks: List[Document] | None = None,
 ) -> List[Document]:
+    import difflib
     candidates: List[Document] = []
     seen = set()
     qnorm = re.sub(r"\s+", " ", (query or "").strip().lower())
@@ -171,7 +261,14 @@ def smart_search(
     if chunks and phrase:
         for d in chunks:
             text = (d.page_content or "").lower()
-            if phrase in text:
+            match = phrase in text
+            if not match:
+                try:
+                    ratio = difflib.SequenceMatcher(None, phrase, text[: min(4000, len(text))]).quick_ratio()
+                    match = ratio >= 0.65
+                except Exception:
+                    match = False
+            if match:
                 key = (text[:128], d.metadata.get("page"))
                 if key not in seen:
                     seen.add(key)
@@ -197,6 +294,117 @@ def infer_doc_title(chunks: List[Document], fallback_name: str) -> str:
             first = txt.splitlines()[0].strip()
             return (first[:80] + "…") if len(first) > 80 else first
     return fallback_name
+
+
+# -------- Section-aware retrieval helpers --------
+
+def _group_text_by_page(chunks: List[Document]) -> List[Tuple[int, str]]:
+    pages: dict[int, List[str]] = {}
+    for d in chunks:
+        p = int(d.metadata.get("page") or 0)
+        pages.setdefault(p, []).append(d.page_content or "")
+    grouped = []
+    for p in sorted(pages.keys()):
+        text = "\n".join(pages[p])
+        grouped.append((p, text))
+    return grouped
+
+
+def _is_header_line(line: str) -> bool:
+    line = (line or "").strip()
+    if not line:
+        return False
+    if len(line) > 140:
+        return False
+    if line.endswith(":") and len(line) >= 5:
+        return True
+    if re.match(r"^(\d+\.|[ivx]+\.|[a-z]\))\s+", line.lower()):
+        return True
+    letters = re.sub(r"[^A-Za-z]", "", line)
+    if letters and letters.isupper() and len(letters) >= 4:
+        return True
+    words = line.split()
+    if words and sum(1 for w in words if w[:1].isupper()) / max(1, len(words)) >= 0.7:
+        return True
+    return False
+
+
+def _find_best_header(lines: List[str], query: str) -> Optional[int]:
+    import difflib
+    q = re.sub(r"\s+", " ", query.strip())
+    best_idx, best_score = None, 0.0
+    for i, ln in enumerate(lines):
+        if not _is_header_line(ln):
+            continue
+        try:
+            score = difflib.SequenceMatcher(None, q.lower(), ln.lower()).ratio()
+        except Exception:
+            score = 0.0
+        if all(w in ln.lower() for w in q.lower().split()[:2]):
+            score += 0.05
+        if score > best_score:
+            best_idx, best_score = i, score
+    if best_idx is not None and best_score >= 0.6:
+        return best_idx
+    return None
+
+
+def _extract_section_span(pages: List[Tuple[int, str]], query: str, max_chars: int = 8000) -> Optional[Tuple[str, int, int, str]]:
+    lines_meta: List[Tuple[int, str]] = []
+    for p, text in pages:
+        for ln in (text or "").splitlines():
+            lines_meta.append((p, ln))
+    lines = [ln for _, ln in lines_meta]
+    idx = _find_best_header(lines, query)
+    if idx is None:
+        return None
+    start_page = lines_meta[idx][0]
+    header_text = lines[idx].strip()
+    buf: List[str] = []
+    total = 0
+    for j in range(idx + 1, len(lines)):
+        ln_page, ln_txt = lines_meta[j]
+        if _is_header_line(ln_txt) and lines_meta[j][0] >= start_page:
+            break
+        piece = (ln_txt or "").rstrip()
+        if not piece:
+            continue
+        if total + len(piece) > max_chars:
+            break
+        buf.append(piece)
+        total += len(piece) + 1
+    content = "\n".join(buf).strip()
+    if not content:
+        return None
+    end_page = start_page
+    for j in range(idx + 1, min(idx + 1 + len(buf), len(lines_meta))):
+        end_page = max(end_page, lines_meta[j][0])
+    return content, start_page, end_page, header_text
+
+
+def robust_retrieve(vs: Chroma, query: str, chunks: List[Document] | None, k: int = 6, method: str = "auto") -> List[Document]:
+    try:
+        if chunks:
+            pages = _group_text_by_page(chunks)
+            span = _extract_section_span(pages, query)
+            if span:
+                content, p_start, p_end, header = span
+                meta = {"page_start": p_start, "page_end": p_end, "section": header}
+                docs = [Document(page_content=content, metadata=meta)]
+                try:
+                    emb_docs = search_documents(vs, query, k=max(2, k // 2), method=method)
+                    seen = set()
+                    for d in emb_docs:
+                        key = hash((d.page_content[:256], d.metadata.get("page")))
+                        if key not in seen:
+                            seen.add(key)
+                            docs.append(d)
+                    return docs[:k]
+                except Exception:
+                    return docs[:k]
+    except Exception:
+        pass
+    return smart_search(vs, query, k=k, method=method, chunks=chunks)
 
 
 # ---------------- Dataset utils (lightweight, inlined) ----------------
@@ -474,10 +682,17 @@ def _file_ext(name: str) -> str:
     return (name or "").lower().split(".")[-1] if "." in (name or "") else ""
 
 
-def ensure_vectorstore(file_name: str, file_bytes: bytes) -> None:
+def ensure_vectorstore(file_name: str, file_bytes: bytes) -> bool:
+    """Build/load PDF vectorstore and return True if new file; reset chat/context on new file."""
     file_id = hashlib.md5(file_bytes).hexdigest()
-    if st.session_state.get("file_id") != file_id or st.session_state.get("vectorstore") is None:
+    is_new = st.session_state.get("file_id") != file_id or st.session_state.get("vectorstore") is None
+    if is_new:
+        # Clear chat and cached context for new document
         st.session_state.messages = []
+        st.session_state.last_context_docs = []
+        st.session_state.last_context_query = None
+        st.session_state.last_context_file_id = None
+
         chunks = process_pdf(file_bytes)
         if not chunks:
             st.error("Could not extract text from PDF.")
@@ -491,11 +706,12 @@ def ensure_vectorstore(file_name: str, file_bytes: bytes) -> None:
         pages = {c.metadata.get("page") for c in chunks if isinstance(c.metadata, dict) and c.metadata.get("page")}
         st.session_state.page_count = len(pages) if pages else None
         st.session_state._raw_chunks = chunks
-    # Reset any cached context to avoid stale summaries
-    st.session_state.last_context_docs = []
-    st.session_state.last_context_query = None
-    st.session_state.last_context_file_id = file_id
+        st.session_state.last_context_file_id = file_id
+        st.session_state.file_id = file_id
+        return True
+    # Same file
     st.session_state.file_id = file_id
+    return False
 
 
 def summarize_document_full(vectorstore: Any, llm: ChatGoogleGenerativeAI, max_chunks: int = 30) -> str:
@@ -630,12 +846,14 @@ if uploaded_file is not None:
             st.error("File too large. Please upload a CSV/XLSX up to 5 MB.")
             st.stop()
 
-    llm = get_gemini(model="gemini-1.5-flash", temperature=0.1)
+    llm = get_gemini(model="gemini-2.5-flash", temperature=0.1)
 
     # PDF branch
     if ext == "pdf":
-        ensure_vectorstore(uploaded_file.name, file_bytes)
+        is_new = ensure_vectorstore(uploaded_file.name, file_bytes)
         vectorstore = st.session_state.vectorstore
+        if is_new:
+            st.info("Previous chat cleared — ready for new document analysis.")
 
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -719,12 +937,11 @@ Document content:
                         if intent_summary and st.session_state.get("last_context_docs") and st.session_state.get("last_context_file_id") == current_fid:
                             docs = st.session_state.last_context_docs
                         else:
-                            docs = smart_search(
+                            docs = robust_retrieve(
                                 vectorstore,
                                 user_question,
                                 k=st.session_state.k_results,
                                 method=st.session_state.retrieval_method,
-                                fetch_k=max(st.session_state.k_results + 2, int(1.5 * st.session_state.k_results)) if st.session_state.retrieval_method == "mmr" else None,
                                 chunks=st.session_state.get("_raw_chunks"),
                             )
                         if docs:
@@ -768,12 +985,18 @@ Question: {user_question}
 """
                                 answer = llm_invoke(llm, prompt)
                             if st.session_state.show_sources:
-                                pages = [str(d.metadata.get("page")) for d in docs if d.metadata.get("page")]
-                                if pages:
-                                    answer += f"\n\nSources: pages {', '.join(sorted(set(pages)))}"
+                                labels = []
+                                for d in docs:
+                                    meta = d.metadata or {}
+                                    if meta.get("page"):
+                                        labels.append(str(meta.get("page")))
+                                    elif meta.get("page_start") and meta.get("page_end"):
+                                        labels.append(f"{meta['page_start']}–{meta['page_end']}")
+                                if labels:
+                                    answer += f"\n\nSources: pages {', '.join(sorted(set(labels)))}"
                         else:
                             if intent_summary:
-                                docs = smart_search(
+                                docs = robust_retrieve(
                                     vectorstore,
                                     st.session_state.last_context_query or "document overview",
                                     k=st.session_state.k_results,
@@ -808,6 +1031,16 @@ Question: {user_question}
             st.error(f"Failed to read spreadsheet: {e}")
             st.stop()
         st.session_state.df = df
+
+        # Reset chat/context if a different spreadsheet content is uploaded
+        file_id = hashlib.md5(file_bytes).hexdigest()
+        if st.session_state.get("file_id") != file_id:
+            st.session_state.messages = []
+            st.session_state.last_context_docs = []
+            st.session_state.last_context_query = None
+            st.session_state.last_context_file_id = None
+            st.session_state.file_id = file_id
+            st.info("Previous chat cleared — ready for new document analysis.")
 
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -1020,7 +1253,7 @@ Question: {user_question}
 
 Answer concisely:
 """
-                llm = get_gemini(model="gemini-1.5-flash", temperature=0.2)
+                llm = get_gemini(model="gemini-2.5-flash", temperature=0.2)
                 answer = llm_invoke(llm, prompt)
             except Exception as e:
                 answer = f"Error: {e}"

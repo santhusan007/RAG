@@ -8,7 +8,7 @@ from langchain_community.llms import Ollama
 from langchain_core.documents import Document
 from typing import List
 
-from modules.pdf_utils import process_pdf, get_or_build_vectorstore, infer_doc_title, search_documents, smart_search
+from modules.pdf_utils import process_pdf, get_or_build_vectorstore, infer_doc_title, search_documents, smart_search, robust_retrieve
 from modules.dataset_utils import analyze_spreadsheet, df_profile_snippet, answer_dataset_question
 from modules.ui import set_page, header as ui_header, app_banner
 
@@ -18,10 +18,21 @@ def _file_ext(name: str) -> str:
     return (name or "").lower().split(".")[-1] if "." in (name or "") else ""
 
 
-def ensure_vectorstore(file_name: str, file_bytes: bytes) -> None:
+def ensure_vectorstore(file_name: str, file_bytes: bytes) -> bool:
+    """Builds/loads vectorstore for a PDF and returns True if this is a new file.
+
+    Also clears chat and cached context only when a new file is detected.
+    """
     file_id = hashlib.md5(file_bytes).hexdigest()
-    if st.session_state.get("file_id") != file_id or st.session_state.get("vectorstore") is None:
+    is_new = st.session_state.get("file_id") != file_id or st.session_state.get("vectorstore") is None
+    if is_new:
+        # Clear chat and cached context for new document
         st.session_state.messages = []
+        st.session_state.last_context_docs = []
+        st.session_state.last_context_query = None
+        st.session_state.last_context_file_id = None
+
+        # Build chunks/vector store
         chunks = process_pdf(file_bytes)
         if not chunks:
             st.error("Could not extract text from PDF.")
@@ -34,12 +45,15 @@ def ensure_vectorstore(file_name: str, file_bytes: bytes) -> None:
         st.session_state.doc_title = infer_doc_title(chunks, file_name)
         pages = {c.metadata.get("page") for c in chunks if isinstance(c.metadata, dict) and c.metadata.get("page")}
         st.session_state.page_count = len(pages) if pages else None
-    st.session_state._raw_chunks = chunks
-    # Reset cached retrieval context for this new file
-    st.session_state.last_context_docs = []
-    st.session_state.last_context_query = None
-    st.session_state.last_context_file_id = file_id
-    st.session_state.file_id = file_id
+        st.session_state._raw_chunks = chunks
+        # Tie caches to this file
+        st.session_state.last_context_file_id = file_id
+        st.session_state.file_id = file_id
+        return True
+    else:
+        # Same file; keep existing vectorstore/chunks and just set active file id
+        st.session_state.file_id = file_id
+        return False
 
 
 def summarize_document_full(vectorstore: Any, llm: Ollama, max_chunks: int = 30) -> str:
@@ -179,8 +193,10 @@ if uploaded_file is not None:
 
     # PDF branch
     if ext == "pdf":
-        ensure_vectorstore(uploaded_file.name, file_bytes)
+        is_new = ensure_vectorstore(uploaded_file.name, file_bytes)
         vectorstore = st.session_state.vectorstore
+        if is_new:
+            st.info("Previous chat cleared — ready for new document analysis.")
 
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -275,12 +291,11 @@ Document content:
                         if intent_summary and st.session_state.get("last_context_docs") and st.session_state.get("last_context_file_id") == current_fid:
                             docs = st.session_state.last_context_docs
                         else:
-                            docs = smart_search(
+                            docs = robust_retrieve(
                                 vectorstore,
                                 user_question,
                                 k=st.session_state.k_results,
                                 method=st.session_state.retrieval_method,
-                                fetch_k= max(st.session_state.k_results + 2, int(1.5*st.session_state.k_results)) if st.session_state.retrieval_method=="mmr" else None,
                                 chunks=st.session_state.get("_raw_chunks"),
                             )
                         if docs:
@@ -326,13 +341,19 @@ Question: {user_question}
 """
                                 answer = llm.invoke(prompt).strip()
                             if st.session_state.show_sources:
-                                pages = [str(d.metadata.get("page")) for d in docs if d.metadata.get("page")]
-                                if pages:
-                                    answer += f"\n\nSources: pages {', '.join(sorted(set(pages)))}"
+                                labels = []
+                                for d in docs:
+                                    meta = d.metadata or {}
+                                    if meta.get("page"):
+                                        labels.append(str(meta.get("page")))
+                                    elif meta.get("page_start") and meta.get("page_end"):
+                                        labels.append(f"{meta['page_start']}–{meta['page_end']}")
+                                if labels:
+                                    answer += f"\n\nSources: pages {', '.join(sorted(set(labels)))}"
                         else:
                             # If we tried to reuse but found nothing, re-fetch normally once
                             if intent_summary:
-                                docs = smart_search(
+                                docs = robust_retrieve(
                                     vectorstore,
                                     st.session_state.last_context_query or "document overview",
                                     k=st.session_state.k_results,
@@ -367,6 +388,16 @@ Question: {user_question}
             st.error(f"Failed to read spreadsheet: {e}")
             st.stop()
         st.session_state.df = df
+
+        # Reset chat/context if this is a new uploaded file (by content hash)
+        file_id = hashlib.md5(file_bytes).hexdigest()
+        if st.session_state.get("file_id") != file_id:
+            st.session_state.messages = []
+            st.session_state.last_context_docs = []
+            st.session_state.last_context_query = None
+            st.session_state.last_context_file_id = None
+            st.session_state.file_id = file_id
+            st.info("Previous chat cleared — ready for new document analysis.")
 
         col1, col2 = st.columns([3, 1])
         with col1:
