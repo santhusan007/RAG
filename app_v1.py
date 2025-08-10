@@ -31,39 +31,10 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_google_genai import ChatGoogleGenerativeAI
+from modules.ui import set_page, header as ui_header, app_banner
 
 
-# ---------------- UI helpers ----------------
-
-def set_page():
-    st.set_page_config(page_title="Data ", page_icon="📄", layout="wide")
-    st.markdown(
-        """
-        <style>
-        .status { background: #eef8ff; color: #0b63ce; padding: 6px 10px; border-radius: 6px; font-size: 0.9rem; display: inline-block; }
-        .app-banner {
-            padding: 14px 16px; border-radius: 10px; margin-bottom: 12px;
-            background: linear-gradient(90deg, #0b63ce, #1e90ff);
-            color: white; font-weight: 600; display:flex; align-items:center; justify-content:space-between;
-        }
-        .app-banner .title { font-size: 1.05rem; letter-spacing: 0.3px; }
-        .app-banner .tag { font-size: 0.85rem; opacity: 0.9; background: rgba(255,255,255,0.18); padding: 4px 8px; border-radius: 6px; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def app_banner():
-    st.markdown(
-        """
-        <div class="app-banner">
-          <div class="title">Atlas </div>
-          <div class="tag">PDF + Spreadsheet </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+# (Using shared UI: set_page(), app_banner() from modules.ui)
 
 
 # ---------------- PDF & RAG utils (inlined) ----------------

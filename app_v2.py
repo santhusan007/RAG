@@ -20,10 +20,11 @@ from typing import Any, List, Tuple, Optional, Dict
 
 import streamlit as st
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageFilter, ImageOps, ImageEnhance
 
 from langchain_core.documents import Document
 from langchain_google_genai import ChatGoogleGenerativeAI
+from modules.ui import set_page, header as ui_header, app_banner
 
 # Reuse shared utilities
 from modules.pdf_utils import (
@@ -40,37 +41,7 @@ from modules.dataset_utils import (
 )
 
 
-# --------------- UI helpers ---------------
-
-def set_page():
-    st.set_page_config(page_title="Atlas v2 — Docs & Data", page_icon="🧭", layout="wide")
-    st.markdown(
-        """
-        <style>
-        .status { background: #eef8ff; color: #0b63ce; padding: 6px 10px; border-radius: 6px; font-size: 0.9rem; display: inline-block; }
-        .app-banner {
-            padding: 14px 16px; border-radius: 10px; margin-bottom: 12px;
-            background: linear-gradient(90deg, #0b63ce, #1e90ff);
-            color: white; font-weight: 600; display:flex; align-items:center; justify-content:space-between;
-        }
-        .app-banner .title { font-size: 1.05rem; letter-spacing: 0.3px; }
-        .app-banner .tag { font-size: 0.85rem; opacity: 0.9; background: rgba(255,255,255,0.18); padding: 4px 8px; border-radius: 6px; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def app_banner():
-    st.markdown(
-        """
-        <div class="app-banner">
-          <div class="title">Atlas v2 — Docs & Data Assistant</div>
-          <div class="tag">PDF/Image OCR • RAG • Summarize • Spreadsheet Insights</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+# (Using shared UI: set_page(), app_banner() from modules.ui)
 
 
 # --------------- LLM helpers ---------------
@@ -130,19 +101,68 @@ def chunks_to_full_text(chunks: List[Document]) -> str:
 # --------------- Image OCR ---------------
 
 def ocr_image_bytes(file_bytes: bytes) -> str:
-    """OCR an image via pytesseract; fallback to EasyOCR if available."""
+    """OCR an image with preprocessing. Prefers pytesseract; falls back to EasyOCR."""
     try:
         img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
     except Exception:
         return ""
 
-    # Try pytesseract
+    def preprocess_image_for_ocr(im: Image.Image) -> List[Image.Image]:
+        """Generate a set of preprocessed variants to improve OCR on noisy scans."""
+        variants: List[Image.Image] = []
+        # Base grayscale
+        gray = ImageOps.grayscale(im)
+        variants.append(gray)
+        # Scaled up
+        try:
+            scale = 1.5
+            up = gray.resize((int(gray.width * scale), int(gray.height * scale)), Image.LANCZOS)
+            variants.append(up)
+        except Exception:
+            pass
+        # Contrast boost
+        try:
+            contrast = ImageEnhance.Contrast(gray).enhance(1.8)
+            variants.append(contrast)
+        except Exception:
+            pass
+        # Sharpen
+        try:
+            sharp = gray.filter(ImageFilter.SHARPEN)
+            variants.append(sharp)
+        except Exception:
+            pass
+        # Light denoise via median
+        try:
+            med = gray.filter(ImageFilter.MedianFilter(size=3))
+            variants.append(med)
+        except Exception:
+            pass
+        # Binary threshold (simple)
+        try:
+            bw = gray.point(lambda p: 255 if p > 160 else 0, mode="1").convert("L")
+            variants.append(bw)
+        except Exception:
+            pass
+        # Also try contrast+sharpen combo
+        try:
+            combo = ImageEnhance.Contrast(gray).enhance(2.0).filter(ImageFilter.SHARPEN)
+            variants.append(combo)
+        except Exception:
+            pass
+        return variants
+
+    # Try pytesseract with multiple preprocess variants
     try:
         import pytesseract  # type: ignore
-        text = pytesseract.image_to_string(img) or ""
-        text = clean_text(text)
-        if len(text) >= 3:
-            return text
+        for trial in preprocess_image_for_ocr(img):
+            txt = clean_text(pytesseract.image_to_string(trial) or "")
+            if len(txt) >= 8:
+                return txt
+        # Last try: original image if variants failed
+        txt = clean_text(pytesseract.image_to_string(img) or "")
+        if len(txt) >= 3:
+            return txt
     except Exception:
         pass
 
@@ -162,6 +182,16 @@ PAN_REGEX = re.compile(r"\b([A-Z]{5}\d{4}[A-Z])\b")
 DATE_REGEX = re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b")
 PHONE_REGEX = re.compile(r"\b(\+?\d[\d\s\-]{8,}\d)\b")
 NUM_LONG_REGEX = re.compile(r"\b(\d{6,})\b")
+
+# Flexible label patterns (generic, extensible)
+NAME_LABELS = [
+    r"name of the holder", r"card ?holder name", r"cardholder name", r"full name",
+    r"applicant name", r"customer name", r"name as.*?",
+    r"name",  # keep generic last so specific ones match first
+]
+NAME_LINE_REGEX = re.compile(rf"(?i)\b({'|'.join(NAME_LABELS)})\b[\s:.-]*([A-Z][A-Za-z][A-Za-z .']{{1,}})")
+FATHER_LABELS = [r"father'?s name", r"father name", r"parent'?s name"]
+FATHER_LINE_REGEX = re.compile(rf"(?i)\b({'|'.join(FATHER_LABELS)})\b[\s:.-]*([A-Z][A-Za-z .']{{2,}})")
 
 
 def split_lines(text: str) -> List[str]:
@@ -195,6 +225,14 @@ def extract_field_pairs(lines: List[str]) -> List[Tuple[str, str]]:
             l, r = clean_text(left), clean_text(right)
             if l and r:
                 pairs.append((l, r))
+    # multi-space split on same line (label    value)
+    for ln in lines:
+        if ":" not in ln and re.search(r"\s{3,}", ln):
+            parts = re.split(r"\s{3,}", ln.strip(), maxsplit=1)
+            if len(parts) == 2:
+                l, r = clean_text(parts[0]), clean_text(parts[1])
+                if l and r:
+                    pairs.append((l, r))
     # adjacency: labelish -> value
     for i, ln in enumerate(lines[:-1]):
         if is_labelish(ln) and ":" not in ln:
@@ -221,35 +259,103 @@ def extract_entities(text: str) -> Dict[str, List[str]]:
     return vals
 
 
-def derive_key_fields(pairs: List[Tuple[str, str]], entities: Dict[str, List[str]]) -> Dict[str, str]:
+def derive_key_fields(lines: List[str], pairs: List[Tuple[str, str]], entities: Dict[str, List[str]]) -> Dict[str, str]:
     kv: Dict[str, str] = {}
+    # PAN
     if entities.get("PAN"):
         kv["PAN Number"] = entities["PAN"][0]
-    # Name
-    name_keys = ["name", "applicant name", "full name", "customer name", "cardholder name"]
+    # Name from labeled pairs first
+    name_keys = [
+        "name of the holder", "card holder name", "cardholder name", "full name",
+        "applicant name", "customer name", "name as", "name",
+    ]
     for l, v in pairs:
-        if any(k in l.lower() for k in name_keys):
-            kv["Name"] = v
-            break
+        low = l.lower()
+        if any(k in low for k in name_keys):
+            # avoid generic phrases
+            val = v.strip().strip(':').strip()
+            if len(val) >= 2 and not re.search(r"income tax|govt|government|permanent account|signature", val, re.I):
+                kv["Name"] = val
+                break
+    # If still missing, scan lines with regex
+    if "Name" not in kv:
+        for ln in lines:
+            m = NAME_LINE_REGEX.search(ln)
+            if m:
+                candidate = m.group(2).strip()
+                if 2 <= len(candidate) <= 60 and not re.search(r"income tax|govt|government|permanent account|signature", candidate, re.I):
+                    kv["Name"] = candidate
+                    break
+    # Heuristic near PAN: take nearby line that looks like a person name
+    if "Name" not in kv and entities.get("PAN"):
+        pan = entities["PAN"][0]
+        idxs = [i for i, ln in enumerate(lines) if pan in ln]
+        banned = re.compile(r"income tax|govt|government|permanent account|signature|date|address|father|mother|son of|daughter of", re.I)
+        def looks_like_name(s: str) -> bool:
+            s = s.strip(' :.-')
+            if not (2 <= len(s) <= 60):
+                return False
+            if any(ch.isdigit() for ch in s):
+                return False
+            words = s.split()
+            if len(words) > 7 or len(words) < 1:
+                return False
+            # uppercase heavy names are common on ID cards
+            if banned.search(s):
+                return False
+            # require at least two alphabetic characters and mostly letters/spaces
+            letters = sum(ch.isalpha() for ch in s)
+            return letters >= max(2, int(0.6 * len(s)))
+        for idx in idxs:
+            for j in range(max(0, idx - 3), min(len(lines), idx + 4)):
+                if j == idx:
+                    continue
+                cand = lines[j]
+                if looks_like_name(cand):
+                    kv["Name"] = cand.strip()
+                    break
+            if "Name" in kv:
+                break
     # DOB
     dob_keys = ["dob", "date of birth", "birth"]
     for l, v in pairs:
         if any(k in l.lower() for k in dob_keys):
-            kv["Date of Birth"] = v
+            kv["Date of Birth"] = v.strip()
             break
     if "Date of Birth" not in kv and entities.get("Dates"):
         kv["Date of Birth"] = entities["Dates"][0]
-    if entities.get("LongNumbers"):
-        kv["Detected Number"] = entities["LongNumbers"][0]
+    # Father Name (if present)
+    for l, v in pairs:
+        if any(k in l.lower() for k in ["father", "father's name", "father name"]):
+            kv["Father's Name"] = v.strip()
+            break
+    if "Father's Name" not in kv:
+        for ln in lines:
+            m = FATHER_LINE_REGEX.search(ln)
+            if m:
+                kv["Father's Name"] = m.group(2).strip()
+                break
+    # Phones and generic numbers (joined)
+    if entities.get("Phones"):
+        kv["Phone(s)"] = ", ".join(entities["Phones"][:3])
+    # Generic long numbers that are not PAN
+    longs = [n for n in (entities.get("LongNumbers") or []) if n not in (entities.get("PAN") or [])]
+    if longs:
+        kv["ID Number(s)"] = ", ".join(longs[:5])
     return kv
 
 
-def extract_from_text(text: str) -> Tuple[Dict[str, str], List[Tuple[str, str]], Dict[str, List[str]]]:
+def extract_from_text(text: str) -> Dict[str, str]:
     lines = split_lines(text)
     pairs = extract_field_pairs(lines)
     ents = extract_entities(" ".join(lines))
-    kv = derive_key_fields(pairs, ents)
-    return kv, pairs, ents
+    kv = derive_key_fields(lines, pairs, ents)
+    # Also include other labeled pairs not already in kv (generic flexibility)
+    for l, v in pairs:
+        key = l.strip().rstrip(':').strip()
+        if key and v and key not in kv:
+            kv[key] = v
+    return kv
 
 
 # --------------- App logic ---------------
@@ -463,38 +569,17 @@ Document content:
             if not text:
                 st.error("Could not extract text from this PDF (install Tesseract/Poppler for OCR).")
             else:
-                kv, pairs, ents = extract_from_text(text)
-                st.subheader("Extracted Key Fields")
-                if kv:
-                    st.json(kv)
-                else:
-                    st.caption("No obvious key fields detected (see pairs below).")
-                st.subheader("Detected Header-Value Pairs")
-                if pairs:
-                    df_pairs = pd.DataFrame(pairs, columns=["Label", "Value"])
-                    st.dataframe(df_pairs, use_container_width=True)
-                else:
-                    st.caption("No header-value pairs detected.")
-                st.subheader("Detected Entities")
-                st.json(ents)
-
-                # Downloads
-                df_key = pd.DataFrame([{"Field": k, "Value": v} for k, v in kv.items()]) if kv else pd.DataFrame(columns=["Field", "Value"])
+                kv = extract_from_text(text)
+                # Minimal UI: only a two-column table
+                df_key = pd.DataFrame([{"Field Name": k, "Extracted Value": v} for k, v in kv.items()]) if kv else pd.DataFrame(columns=["Field Name", "Extracted Value"])
+                st.dataframe(df_key, use_container_width=True, hide_index=True)
+                # Optional download buttons (silent UI)
                 csv_bytes = df_key.to_csv(index=False).encode("utf-8")
-                st.download_button("Download Key Fields (CSV)", data=csv_bytes, file_name="key_fields.csv", mime="text/csv")
+                st.download_button("Download CSV", data=csv_bytes, file_name="extracted_fields.csv", mime="text/csv")
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine="openpyxl") as xw:
-                    (df_key if not df_key.empty else pd.DataFrame(columns=["Field", "Value"]))\
-                        .to_excel(xw, index=False, sheet_name="KeyFields")
-                    (pd.DataFrame(pairs, columns=["Label", "Value"]) if pairs else pd.DataFrame(columns=["Label", "Value"]))\
-                        .to_excel(xw, index=False, sheet_name="Pairs")
-                    ents_rows = []
-                    for t, arr in (ents or {}).items():
-                        for v in arr:
-                            ents_rows.append({"Type": t, "Value": v})
-                    (pd.DataFrame(ents_rows) if ents_rows else pd.DataFrame(columns=["Type", "Value"]))\
-                        .to_excel(xw, index=False, sheet_name="Entities")
-                st.download_button("Download All (Excel)", data=out.getvalue(), file_name="extracted_fields.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    df_key.to_excel(xw, index=False, sheet_name="ExtractedFields")
+                st.download_button("Download Excel", data=out.getvalue(), file_name="extracted_fields.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
             # Chat
             for m in st.session_state.messages:
@@ -565,40 +650,15 @@ Question: {user_q}
         if not img_text:
             st.error("Could not OCR this image. Install pytesseract or easyocr and try again.")
         else:
-            if mode != "Extract Fields":
-                st.info("Tip: Switch to 'Extract Fields' mode for structured extraction from images.")
-            kv, pairs, ents = extract_from_text(img_text)
-            st.subheader("Extracted Key Fields")
-            if kv:
-                st.json(kv)
-            else:
-                st.caption("No obvious key fields detected (showing pairs below).")
-            st.subheader("Detected Header-Value Pairs")
-            if pairs:
-                df_pairs = pd.DataFrame(pairs, columns=["Label", "Value"])
-                st.dataframe(df_pairs, use_container_width=True)
-            else:
-                st.caption("No header-value pairs detected.")
-            st.subheader("Detected Entities")
-            st.json(ents)
-
-            # Downloads
-            df_key = pd.DataFrame([{"Field": k, "Value": v} for k, v in kv.items()]) if kv else pd.DataFrame(columns=["Field", "Value"])
+            kv = extract_from_text(img_text)
+            df_key = pd.DataFrame([{"Field Name": k, "Extracted Value": v} for k, v in kv.items()]) if kv else pd.DataFrame(columns=["Field Name", "Extracted Value"])
+            st.dataframe(df_key, use_container_width=True, hide_index=True)
             csv_bytes = df_key.to_csv(index=False).encode("utf-8")
-            st.download_button("Download Key Fields (CSV)", data=csv_bytes, file_name="key_fields.csv", mime="text/csv")
+            st.download_button("Download CSV", data=csv_bytes, file_name="extracted_fields.csv", mime="text/csv")
             out = io.BytesIO()
             with pd.ExcelWriter(out, engine="openpyxl") as xw:
-                (df_key if not df_key.empty else pd.DataFrame(columns=["Field", "Value"]))\
-                    .to_excel(xw, index=False, sheet_name="KeyFields")
-                (pd.DataFrame(pairs, columns=["Label", "Value"]) if pairs else pd.DataFrame(columns=["Label", "Value"]))\
-                    .to_excel(xw, index=False, sheet_name="Pairs")
-                ents_rows = []
-                for t, arr in (ents or {}).items():
-                    for v in arr:
-                        ents_rows.append({"Type": t, "Value": v})
-                (pd.DataFrame(ents_rows) if ents_rows else pd.DataFrame(columns=["Type", "Value"]))\
-                    .to_excel(xw, index=False, sheet_name="Entities")
-            st.download_button("Download All (Excel)", data=out.getvalue(), file_name="extracted_fields.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                df_key.to_excel(xw, index=False, sheet_name="ExtractedFields")
+            st.download_button("Download Excel", data=out.getvalue(), file_name="extracted_fields.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     elif ext in ("csv", "xlsx"):
         # Spreadsheet analytics
