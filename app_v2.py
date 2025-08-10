@@ -415,6 +415,7 @@ for key, default in (
     ("last_context_docs", []),
     ("last_context_query", None),
     ("last_context_file_id", None),
+    ("doc_processing", False),
 ):
     if key not in st.session_state:
         st.session_state[key] = default
@@ -433,6 +434,9 @@ with st.sidebar:
         index=0 if st.session_state.get("retrieval_method") == "similarity" else 1,
         key="retrieval_method",
     )
+    # PDF options moved to sidebar for compact control
+    st.session_state.k_results = st.slider("Results to retrieve (k)", 2, 12, st.session_state.k_results)
+    st.session_state.show_sources = st.checkbox("Show source pages", value=st.session_state.show_sources)
     if st.button("Clear chat"):
         st.session_state.messages = []
 
@@ -478,25 +482,25 @@ if uploaded is not None:
     llm = get_gemini(model="gemini-2.5-flash", temperature=0.1)
 
     if ext == "pdf":
-        is_new = ensure_pdf_vectorstore(uploaded.name, file_bytes)
+        # Show processing indicator and disable inputs while building the index
+        if st.session_state.get("file_id") != hashlib.md5(file_bytes).hexdigest() or st.session_state.get("vectorstore") is None:
+            st.session_state.doc_processing = True
+            with st.status("Processing document…", expanded=False) as status:
+                is_new = ensure_pdf_vectorstore(uploaded.name, file_bytes)
+                status.update(label="Document ready", state="complete")
+            st.session_state.doc_processing = False
+        else:
+            is_new = False
         vectorstore = st.session_state.vectorstore
         if is_new:
             st.info("Previous chat cleared — ready for new document analysis.")
 
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.subheader(f"Document: {st.session_state.get('doc_title') or uploaded.name}")
-            if st.session_state.get("page_count"):
-                st.caption(f"Pages: {st.session_state.page_count}")
-        with col2:
-            st.markdown("<div class='status'>Ready • Indexed</div>", unsafe_allow_html=True)
-
-        # Controls
-        c1, c2 = st.columns(2)
-        with c1:
-            st.session_state.k_results = st.slider("Results to retrieve (k)", 2, 12, st.session_state.k_results)
-        with c2:
-            st.session_state.show_sources = st.checkbox("Show source pages", value=st.session_state.show_sources)
+        # Minimal doc label near header
+        doc_label = st.session_state.get('doc_title') or uploaded.name
+        if st.session_state.get("page_count"):
+            st.caption(f"Document: {doc_label} • Pages: {st.session_state.page_count}")
+        else:
+            st.caption(f"Document: {doc_label}")
 
         if mode == "Summarize":
             with st.status("Summarizing document…", expanded=False) as status:
@@ -585,7 +589,11 @@ Document content:
             for m in st.session_state.messages:
                 with st.chat_message(m["role"]):
                     st.markdown(m["content"])
-            user_q = st.chat_input("Ask about this document…")
+            if st.session_state.doc_processing:
+                st.info("Processing document… chat will be available shortly.")
+                user_q = None
+            else:
+                user_q = st.chat_input("Ask about this document…")
             if user_q:
                 st.session_state.messages.append({"role": "user", "content": user_q})
                 with st.chat_message("user"):
@@ -640,11 +648,8 @@ Question: {user_q}
 
     elif ext in ("jpg", "jpeg", "png"):
         # Extract Fields for images
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.subheader(f"Image: {uploaded.name}")
-        with col2:
-            st.markdown("<div class='status'>Ready • OCR</div>", unsafe_allow_html=True)
+        # Minimal file label near header
+        st.caption(f"Image: {uploaded.name}")
 
         img_text = ocr_image_bytes(file_bytes)
         if not img_text:
@@ -682,12 +687,8 @@ Question: {user_q}
             st.session_state.file_id = file_id
             st.info("Previous chat cleared — ready for new document analysis.")
 
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.subheader(f"Spreadsheet: {uploaded.name}")
-            st.caption(f"Rows: {df.shape[0]} • Columns: {df.shape[1]}")
-        with col2:
-            st.markdown("<div class='status'>Ready • Parsed</div>", unsafe_allow_html=True)
+        # Minimal file label near header
+        st.caption(f"Spreadsheet: {uploaded.name} • Rows: {df.shape[0]} • Columns: {df.shape[1]}")
 
         insights = analyze_spreadsheet(df)
         st.markdown(insights)
@@ -794,12 +795,12 @@ else:
                         pass
                 history_text = "\n".join(history)
                 prompt = f"""
-You are a helpful assistant. There is no document context loaded. Answer the user's question using only the conversation so far.
+You are a helpful assistant. There is no document loaded. Answer using your general knowledge. Use the conversation for additional context if helpful.
 
-Conversation so far (may be empty):
+Conversation (recent, may be empty):
 {history_text}
 
-Question: {user_q}
+User question: {user_q}
 """
                 llm = get_gemini(model="gemini-2.5-flash", temperature=0.2)
                 answer = llm_invoke(llm, prompt)
