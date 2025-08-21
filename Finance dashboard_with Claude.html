@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Finance Analytics - Cost Card Effectiveness</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            color: #2d3748;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        /* Header */
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 40px 0;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            color: #1a365d;
+            margin-bottom: 10px;
+            font-weight: 700;
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            color: #4a5568;
+        }
+
+        /* Navigation Tabs */
+        .nav-container {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 30px;
+        }
+
+        .nav-tabs {
+            display: flex;
+            background: white;
+            border-radius: 15px;
+            padding: 8px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+            gap: 4px;
+        }
+
+        .nav-tab {
+            padding: 12px 24px;
+            border: none;
+            background: transparent;
+            color: #4a5568;
+            cursor: pointer;
+            border-radius: 10px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            white-space: nowrap;
+        }
+
+        .nav-tab:hover {
+            background: #f7fafc;
+            color: #2d3748;
+        }
+
+        .nav-tab.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        /* Filters */
+        .filters {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+            padding: 25px;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.08);
+        }
+
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .filter-label {
+            font-weight: 600;
+            color: #2d3748;
+            font-size: 0.9rem;
+        }
+
+        .filter-select {
+            padding: 10px 15px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            background: white;
+            color: #2d3748;
+            font-size: 0.9rem;
+            transition: border-color 0.3s ease;
+        }
+
+        .filter-select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        /* Cards */
+        .dashboard-content {
+            display: none;
+        }
+
+        .dashboard-content.active {
+            display: block;
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .metric-card {
+            background: white;
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.08);
+            border-left: 4px solid #667eea;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .metric-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+        }
+
+        .metric-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .metric-title {
+            font-size: 0.9rem;
+            color: #718096;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+
+        .metric-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 1.2rem;
+        }
+
+        .metric-value {
+            font-size: 2.2rem;
+            font-weight: 700;
+            color: #1a365d;
+            margin-bottom: 10px;
+        }
+
+        .metric-change {
+            display: inline-flex;
+            align-items: center;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .metric-change.positive {
+            background: #c6f6d5;
+            color: #22543d;
+        }
+
+        .metric-change.negative {
+            background: #fed7d7;
+            color: #742a2a;
+        }
+
+        .metric-change.neutral {
+            background: #e2e8f0;
+            color: #4a5568;
+        }
+
+        /* Data Table */
+        .data-section {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.08);
+            margin-bottom: 30px;
+            overflow: hidden;
+        }
+
+        .section-header {
+            padding: 20px 25px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .section-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin: 0;
+        }
+
+        .data-table {
+            width: 100%;
+        }
+
+        .table-header {
+            background: #f7fafc;
+            font-weight: 600;
+            color: #2d3748;
+        }
+
+        .table-row {
+            display: grid;
+            grid-template-columns: 2fr 1.2fr 1.2fr 1fr 1fr;
+            gap: 15px;
+            padding: 20px 25px;
+            border-bottom: 1px solid #e2e8f0;
+            align-items: center;
+        }
+
+        .table-row:last-child {
+            border-bottom: none;
+        }
+
+        .table-row:hover {
+            background: #f7fafc;
+        }
+
+        .status-badge {
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-align: center;
+        }
+
+        .status-badge.success {
+            background: #c6f6d5;
+            color: #22543d;
+        }
+
+        .status-badge.warning {
+            background: #fef5e7;
+            color: #744210;
+        }
+
+        .status-badge.danger {
+            background: #fed7d7;
+            color: #742a2a;
+        }
+
+        /* Action Panel */
+        .action-panel {
+            background: white;
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.08);
+            border-left: 4px solid #48bb78;
+        }
+
+        .action-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: #1a365d;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .action-list {
+            list-style: none;
+        }
+
+        .action-item {
+            padding: 15px;
+            margin-bottom: 10px;
+            background: #f7fafc;
+            border-radius: 10px;
+            border-left: 3px solid #667eea;
+            transition: all 0.3s ease;
+        }
+
+        .action-item:hover {
+            background: #edf2f7;
+            transform: translateX(5px);
+        }
+
+        .two-column {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+
+        .three-column {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 20px;
+        }
+
+        /* Progress Bar */
+        .progress-container {
+            margin-top: 15px;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e2e8f0;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            border-radius: 4px;
+            transition: width 1s ease;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .nav-tabs {
+                flex-direction: column;
+                width: 100%;
+            }
+            
+            .two-column, .three-column {
+                grid-template-columns: 1fr;
+            }
+            
+            .table-row {
+                grid-template-columns: 1fr;
+                gap: 10px;
+                text-align: left;
+            }
+            
+            .metrics-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>💼 Finance Analytics Dashboard</h1>
+            <p>Cost Card Effectiveness & Strategic Business Intelligence</p>
+        </div>
+
+        <!-- Filters -->
+        <div class="filters">
+            <div class="filter-group">
+                <label class="filter-label">Tier Level</label>
+                <select class="filter-select">
+                    <option>All Tiers</option>
+                    <option>Tier 1 - Premium</option>
+                    <option>Tier 2 - Standard</option>
+                    <option>Tier 3 - Economy</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label class="filter-label">Job Level</label>
+                <select class="filter-select">
+                    <option>All Levels</option>
+                    <option>L15-L25</option>
+                    <option>L30-L35</option>
+                    <option>L40-L50</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label class="filter-label">Location</label>
+                <select class="filter-select">
+                    <option>All Cities</option>
+                    <option>Bengaluru</option>
+                    <option>Mumbai</option>
+                    <option>Hyderabad</option>
+                    <option>Pune</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label class="filter-label">Time Period</label>
+                <select class="filter-select">
+                    <option>Jan-Oct 2025</option>
+                    <option>Last 4 Months</option>
+                    <option>YTD</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Navigation -->
+        <div class="nav-container">
+            <div class="nav-tabs">
+                <button class="nav-tab active" onclick="showTab('executive')">📊 Executive Summary</button>
+                <button class="nav-tab" onclick="showTab('performance')">📈 Performance Analysis</button>
+                <button class="nav-tab" onclick="showTab('location')">🗺️ Location Strategy</button>
+                <button class="nav-tab" onclick="showTab('forecast')">🔮 Future Planning</button>
+            </div>
+        </div>
+
+        <!-- Executive Summary Tab -->
+        <div id="executive" class="dashboard-content active">
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <div class="metric-title">Total Billing Revenue</div>
+                        <div class="metric-icon">₹</div>
+                    </div>
+                    <div class="metric-value">₹128.4 Cr</div>
+                    <div class="metric-change positive">↗ +4.2% MoM</div>
+                    <div class="progress-container">
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: 85%"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <div class="metric-title">Total Salary Cost</div>
+                        <div class="metric-icon">💰</div>
+                    </div>
+                    <div class="metric-value">₹89.6 Cr</div>
+                    <div class="metric-change negative">↗ +6.1% MoM</div>
+                    <div class="progress-container">
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: 92%"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <div class="metric-title">Billing Coverage</div>
+                        <div class="metric-icon">📊</div>
+                    </div>
+                    <div class="metric-value">86.2%</div>
+                    <div class="metric-change positive">Target ≥ 85%</div>
+                    <div class="progress-container">
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: 86%"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <div class="metric-title">Rate Reviews Needed</div>
+                        <div class="metric-icon">⚠️</div>
+                    </div>
+                    <div class="metric-value">17</div>
+                    <div class="metric-change negative">+4 roles flagged</div>
+                </div>
+            </div>
+
+            <div class="data-section">
+                <div class="section-header">
+                    <h3 class="section-title">📋 Salary vs Benchmark Analysis</h3>
+                </div>
+                <div class="data-table">
+                    <div class="table-row table-header">
+                        <div><strong>Role & Level</strong></div>
+                        <div><strong>Benchmark</strong></div>
+                        <div><strong>Current</strong></div>
+                        <div><strong>Gap</strong></div>
+                        <div><strong>Status</strong></div>
+                    </div>
+                    <div class="table-row">
+                        <div><strong>Tier 1 • Level 45</strong></div>
+                        <div>₹23.6L</div>
+                        <div>₹25.4L</div>
+                        <div>+7.6%</div>
+                        <div><span class="status-badge danger">Over Benchmark</span></div>
+                    </div>
+                    <div class="table-row">
+                        <div><strong>Tier 2 • Level 35</strong></div>
+                        <div>₹16.8L</div>
+                        <div>₹15.9L</div>
+                        <div>-5.1%</div>
+                        <div><span class="status-badge success">Below Benchmark</span></div>
+                    </div>
+                    <div class="table-row">
+                        <div><strong>Tier 3 • Level 25</strong></div>
+                        <div>₹12.2L</div>
+                        <div>₹12.9L</div>
+                        <div>+5.7%</div>
+                        <div><span class="status-badge warning">Slightly High</span></div>
+                    </div>
+                    <div class="table-row">
+                        <div><strong>Tier 1 • Level 50</strong></div>
+                        <div>₹28.8L</div>
+                        <div>₹27.5L</div>
+                        <div>-4.5%</div>
+                        <div><span class="status-badge success">Headroom</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="action-panel">
+                <div class="action-title">
+                    🎯 Immediate Action Items
+                </div>
+                <ul class="action-list">
+                    <li class="action-item">
+                        <strong>Budget Planning:</strong> Reserve retention pool for under-benchmark roles in hotspot locations
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function showTab(tabName) {
+            // Hide all content sections
+            const allContent = document.querySelectorAll('.dashboard-content');
+            allContent.forEach(content => {
+                content.classList.remove('active');
+            });
+            
+            // Remove active class from all tabs
+            const allTabs = document.querySelectorAll('.nav-tab');
+            allTabs.forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Show selected content
+            document.getElementById(tabName).classList.add('active');
+            
+            // Add active class to clicked tab
+            event.target.classList.add('active');
+        }
+    </script>
+</body>
+</html>">
+                        <strong>Freeze High-Gap Offers:</strong> Stop offers >+10% over benchmark unless client rate supports ≥25% gross margin
+                    </li>
+                    <li class="action-item">
+                        <strong>Location Optimization:</strong> Move Tier 3 L25-L30 hiring to Hyderabad/Jaipur (12-15% cost savings)
+                    </li>
+                    <li class="action-item">
+                        <strong>Rate Review Pipeline:</strong> Trigger rate reviews for Tier 1 L45 with 3 clients (target +7-10% uplift)
+                    </li>
+                    <li class="action-item">
+                        <strong>Auto-Rule:</strong> Gap >8% for 2 months → auto-open negotiation ticket
+                    </li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Performance Analysis Tab -->
+        <div id="performance" class="dashboard-content">
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <div class="metric-title">Coverage Rate</div>
+                        <div class="metric-icon">📈</div>
+                    </div>
+                    <div class="metric-value">86.2%</div>
+                    <div class="metric-change positive">Above target</div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <div class="metric-title">Avg Margin/Employee</div>
+                        <div class="metric-icon">💡</div>
+                    </div>
+                    <div class="metric-value">₹19.7k</div>
+                    <div class="metric-change negative">-3.4% MoM</div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <div class="metric-title">Attrition Rate</div>
+                        <div class="metric-icon">📊</div>
+                    </div>
+                    <div class="metric-value">18.9%</div>
+                    <div class="metric-change negative">Above industry</div>
+                </div>
+            </div>
+
+            <div class="data-section">
+                <div class="section-header">
+                    <h3 class="section-title">🔍 Margin Leakage Analysis</h3>
+                </div>
+                <div class="data-table">
+                    <div class="table-row table-header">
+                        <div><strong>Role</strong></div>
+                        <div><strong>Billing/Mo</strong></div>
+                        <div><strong>Salary/Mo</strong></div>
+                        <div><strong>Margin</strong></div>
+                        <div><strong>Action</strong></div>
+                    </div>
+                    <div class="table-row">
+                        <div><strong>L30 • Tier 3</strong></div>
+                        <div>₹72k</div>
+                        <div>₹74k</div>
+                        <div>-₹2k</div>
+                        <div><span class="status-badge danger">Fix Now</span></div>
+                    </div>
+                    <div class="table-row">
+                        <div><strong>L25 • Tier 1</strong></div>
+                        <div>₹79k</div>
+                        <div>₹75k</div>
+                        <div>+₹4k</div>
+                        <div><span class="status-badge warning">Monitor</span></div>
+                    </div>
+                    <div class="table-row">
+                        <div><strong>L45 • Tier 2</strong></div>
+                        <div>₹106k</div>
+                        <div>₹93k</div>
+                        <div>+₹13k</div>
+                        <div><span class="status-badge success">Healthy</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="action-panel">
+                <div class="action-title">
+                    ⚡ Performance Actions
+                </div>
+                <ul class="action-list">
+                    <li class="action-item">
+                        <strong>Rate Review:</strong> Open rate reviews for L30•T3 at 4 clients (target +8%)
+                    </li>
+                    <li class="action-item">
+                        <strong>Hire Location:</strong> Move L25•T3 hires to Hyderabad/Jaipur
+                    </li>
+                    <li class="action-item">
+                        <strong>Backfill Strategy:</strong> Replace 6 attritions in Pune with lower-cost locations
+                    </li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Location Strategy Tab -->
+        <div id="location" class="dashboard-content">
+            <div class="data-section">
+                <div class="section-header">
+                    <h3 class="section-title">🗺️ Location Cost Analysis (Last 4 Months)</h3>
+                </div>
+                <div class="data-table">
+                    <div class="table-row table-header">
+                        <div><strong>Location</strong></div>
+                        <div><strong>L25 Median</strong></div>
+                        <div><strong>L30 Median</strong></div>
+                        <div><strong>L35 Median</strong></div>
+                        <div><strong>Strategy</strong></div>
+                    </div>
+                    <div class="table-row">
+                        <div><strong>🏆 Hyderabad</strong></div>
+                        <div>₹58k</div>
+                        <div>₹65k</div>
+                        <div>₹74k</div>
+                        <div><span class="status-badge success">Primary Hub</span></div>
+                    </div>
+                    <div class="table-row">
+                        <div><strong>🥈 Jaipur</strong></div>
+                        <div>₹57k</div>
+                        <div>₹64k</div>
+                        <div>₹72k</div>
+                        <div><span class="status-badge success">Expand Here</span></div>
+                    </div>
+                    <div class="table-row">
+                        <div><strong>⚠️ Bengaluru</strong></div>
+                        <div>₹68k</div>
+                        <div>₹78k</div>
+                        <div>₹92k</div>
+                        <div><span class="status-badge warning">Selective</span></div>
+                    </div>
+                    <div class="table-row">
+                        <div><strong>🚫 Mumbai</strong></div>
+                        <div>₹70k</div>
+                        <div>₹82k</div>
+                        <div>₹96k</div>
+                        <div><span class="status-badge danger">Tier 1 Only</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="two-column">
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <div class="metric-title">Cost Savings Potential</div>
+                        <div class="metric-icon">💰</div>
+                    </div>
+                    <div class="metric-value">12-15%</div>
+                    <div class="metric-change positive">vs high-cost cities</div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <div class="metric-title">Optimal Allocation</div>
+                        <div class="metric-icon">📊</div>
+                    </div>
+                    <div class="metric-value">70%</div>
+                    <div class="metric-change neutral">Tier 3 to low-cost</div>
+                </div>
+            </div>
+
+            <div class="action-panel">
+                <div class="action-title">
+                    🎯 Location Strategy
+                </div>
+                <ul class="action-list">
+                    <li class="action-item">
+                        <strong>Route Tier 3 L25-L30:</strong> Direct demand to Hyderabad/Jaipur for 12-15% savings
+                    </li>
+                    <li class="action-item">
+                        <strong>Limit Premium Cities:</strong> Bengaluru/Mumbai for Tier 1 client-funded roles only
+                    </li>
+                    <li class="action-item">
+                        <strong>Pipeline Development:</strong> Open talent pipeline in Ahmedabad for L30-L35
+                    </li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Future Planning Tab -->
+        <div id="forecast" class="dashboard-content">
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <div class="metric-title">Post +8% Hike Coverage</div>
+                        <div class="metric-icon">📉</div>
+                    </div>
+                    <div class="metric-value">78.4%</div>
+                    <div class="metric-change negative">-7.8pp risk</div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <div class="metric-title">Negative Margin Roles</div>
+                        <div class="metric-icon">⚠️</div>
+                    </div>
+                    <div class="metric-value">23</div>
+                    <div class="metric-change negative">+12 vs current</div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <div class="metric-title">+5% Rate Impact</div>
+                        <div class="metric-icon">💰</div>
+                    </div>
+                    <div class="metric-value">₹3.1Cr</div>
+                    <div class="metric-change positive">12-month margin</div>
+                </div>
+            </div>
+
+            <div class="data-section">
+                <div class="section-header">
+                    <h3 class="section-title">🔮 Scenario Planning - Post Salary Revision</h3>
+                </div>
+                <div class="data-table">
+                    <div class="table-row table-header">
+                        <div><strong>Role & Location</strong></div>
+                        <div><strong>Current Coverage</strong></div>
+                        <div><strong>Post-Hike</strong></div>
+                        <div><strong>Headcount</strong></div>
+                        <div><strong>Priority</strong></div>
+                    </div>
+                    <div class="table-row">
+                        <div><strong>L30 • T3 • Pune</strong></div>
+                        <div>92%</div>
+                        <div>84%</div>
+                        <div>64 people</div>
+                        <div><span class="status-badge danger">High</span></div>
+                    </div>
+                    <div class="table-row">
+                        <div><strong>L25 • T1 • Mumbai</strong></div>
+                        <div>105%</div>
+                        <div>96%</div>
+                        <div>31 people</div>
+                        <div><span class="status-badge warning">Medium</span></div>
+                    </div>
+                    <div class="table-row">
+                        <div><strong>L35 • T2 • Hyderabad</strong></div>
+                        <div>110%</div>
+                        <div>102%</div>
+                        <div>78 people</div>
+                        <div><span class="status-badge success">Low</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="action-panel">
+                <div class="action-title">
+                    🚀 Future-Ready Actions
+                </div>
+                <ul class="action-list">
+                    <li class="action-item">
+                        <strong>Proactive Rate Reviews:</strong> Start negotiations for 23 high-risk roles now
+                    </li>
+                    <li class="action-item">
+                        <strong>Geographic Shift:</strong> 70% of new Tier 3 hires to Hyderabad/Jaipur
+                    </li>
+                    <li class="action-item">
+                        <strong>Hiring Freeze:</strong> Roles with >10% benchmark gap unless 85%+ utilization
+                    </li>
+                    <li class="action-item
